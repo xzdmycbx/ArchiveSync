@@ -210,15 +210,6 @@ func (e *Engine) execute(ctx context.Context, target *models.Target, run *models
 
 	run.SizeBytes = res.Size
 	run.FileCount = res.FileCount
-	if res.SkippedCount > 0 {
-		e.log.Warn("archive skipped unreadable entries", "target", target.Name,
-			"skipped", res.SkippedCount, "sample", res.Skipped)
-	}
-	if res.FileCount == 0 && res.SkippedCount > 0 {
-		run.Status = models.RunFailed
-		run.Message = fmt.Sprintf("源目录中所有文件均无法读取（%d 个，可能是运行用户权限不足）", res.SkippedCount)
-		return
-	}
 	key := path.Join(dir, tsLocal.Format(retention.DirDateLayout), tsLocal.Format(retention.FileTimeLayout)+ext)
 	run.ArchiveKey = key
 
@@ -277,9 +268,6 @@ func (e *Engine) execute(ctx context.Context, target *models.Target, run *models
 		run.Status = models.RunSuccess
 		run.Message = fmt.Sprintf("已上传至 %d 个渠道（%s，%d 个文件）",
 			okCount, humanBytes(res.Size), res.FileCount)
-		if res.SkippedCount > 0 {
-			run.Message += fmt.Sprintf("，跳过 %d 个无法读取的文件", res.SkippedCount)
-		}
 	}
 }
 
