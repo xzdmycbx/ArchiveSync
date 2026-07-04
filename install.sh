@@ -175,6 +175,23 @@ EOF
   $SUDO systemctl --no-pager --lines=0 status archive-sync.service || true
 fi
 
+# --- 6. 记录安装信息（供 update.sh 使用） ----------------------------------
+SERVICE_FLAG=0
+if [ "${INSTALL_SVC}" = "y" ] || [ "${INSTALL_SVC}" = "Y" ]; then SERVICE_FLAG=1; fi
+INFO_FILE="${REPO_DIR}/.install.conf"
+info "记录安装信息到 ${INFO_FILE}（供 ./update.sh 使用）"
+cat > "${INFO_FILE}" <<EOF
+# ArchiveSync 安装记录 —— 由 install.sh 生成，供 update.sh 读取。
+# 本文件包含本机安装路径，已被 .gitignore 忽略，请勿提交。
+ARCHIVE_SYNC_INSTALL_DIR="${INSTALL_DIR}"
+ARCHIVE_SYNC_BIN_NAME="${BIN_NAME}"
+ARCHIVE_SYNC_CONFIG="${CONFIG_PATH}"
+ARCHIVE_SYNC_DATA_DIR="${DATA_DIR}"
+ARCHIVE_SYNC_SVC_USER="${SVC_USER}"
+ARCHIVE_SYNC_SERVICE="${SERVICE_FLAG}"
+ARCHIVE_SYNC_INSTALLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+EOF
+
 # --- 完成 -------------------------------------------------------------------
 echo
 info "${C_B}安装完成${C_0}"
@@ -197,4 +214,5 @@ echo "    ${BIN_NAME} status          # 查看状态"
 echo "    ${BIN_NAME} iam             # 重新配置 IAM"
 echo "    ${BIN_NAME} backup <目标>    # 立即备份"
 echo "    systemctl restart archive-sync   # 重启服务"
+echo "    ./update.sh                 # 拉取更新并重新部署到本目录"
 echo

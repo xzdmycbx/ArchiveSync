@@ -10,6 +10,9 @@
 *.db-wal
 *.db-shm
 
+# install location recorded by install.sh (machine-specific; read by update.sh)
+/.install.conf
+
 # editor / OS
 .idea/
 .vscode/
