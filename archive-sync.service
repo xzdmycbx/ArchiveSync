@@ -1,0 +1,27 @@
+# ArchiveSync systemd 服务模板（参考）
+#
+# install.sh 会依据实际安装路径自动生成 /etc/systemd/system/archive-sync.service。
+# 如需手动安装，请将下方 {{INSTALL_DIR}} 等占位符替换为真实值后放置到
+# /etc/systemd/system/archive-sync.service，然后:
+#   systemctl daemon-reload && systemctl enable --now archive-sync
+
+[Unit]
+Description=ArchiveSync 备份同步服务
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=archive-sync
+Group=archive-sync
+Environment=ARCHIVE_SYNC_CONFIG={{INSTALL_DIR}}/config.yaml
+WorkingDirectory={{INSTALL_DIR}}
+ExecStart={{INSTALL_DIR}}/archive-sync serve
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths={{DATA_DIR}} {{INSTALL_DIR}}
+
+[Install]
+WantedBy=multi-user.target
