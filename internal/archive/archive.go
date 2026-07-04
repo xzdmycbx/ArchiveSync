@@ -22,10 +22,26 @@ import (
 
 // Result describes a successfully created archive file.
 type Result struct {
-	Path      string // filesystem path of the archive file
-	Size      int64  // final file size in bytes
-	FileCount int    // number of regular files stored
-	Format    string // "tar.gz" or "zip"
+	Path         string   // filesystem path of the archive file
+	Size         int64    // final file size in bytes
+	FileCount    int      // number of regular files stored
+	Format       string   // "tar.gz" or "zip"
+	Skipped      []string // sample of paths skipped (e.g. unreadable)
+	SkippedCount int      // total number of entries skipped
+}
+
+// skipList records entries skipped during the walk (e.g. permission denied) so
+// a single unreadable file or directory does not abort the whole backup.
+type skipList struct {
+	count int
+	paths []string
+}
+
+func (s *skipList) add(p string) {
+	s.count++
+	if len(s.paths) < 20 { // keep a bounded sample for reporting
+		s.paths = append(s.paths, p)
+	}
 }
 
 // Ext returns the file extension (including the leading dot) for the archive
@@ -80,11 +96,12 @@ func Create(ctx context.Context, srcDir, destDir, baseName string, opts models.A
 		return nil, fmt.Errorf("archive: create %q: %w", destPath, err)
 	}
 
+	skips := &skipList{}
 	var fileCount int
 	if format == "zip" {
-		fileCount, err = writeZip(ctx, out, srcDir, destAbs, opts)
+		fileCount, err = writeZip(ctx, out, srcDir, destAbs, opts, skips)
 	} else {
-		fileCount, err = writeTarGz(ctx, out, srcDir, destAbs, opts)
+		fileCount, err = writeTarGz(ctx, out, srcDir, destAbs, opts, skips)
 	}
 	if err != nil {
 		_ = out.Close()
@@ -102,10 +119,12 @@ func Create(ctx context.Context, srcDir, destDir, baseName string, opts models.A
 	}
 
 	return &Result{
-		Path:      destPath,
-		Size:      st.Size(),
-		FileCount: fileCount,
-		Format:    format,
+		Path:         destPath,
+		Size:         st.Size(),
+		FileCount:    fileCount,
+		Format:       format,
+		Skipped:      skips.paths,
+		SkippedCount: skips.count,
 	}, nil
 }
 
@@ -119,15 +138,15 @@ type entry struct {
 
 // writeTarGz streams a gzip-compressed tar archive to w. Writers are closed in
 // the correct order (tar then gzip) and the first error is surfaced.
-func writeTarGz(ctx context.Context, w io.Writer, srcDir, destAbs string, opts models.ArchiveOptions) (int, error) {
+func writeTarGz(ctx context.Context, w io.Writer, srcDir, destAbs string, opts models.ArchiveOptions, skips *skipList) (int, error) {
 	gz, err := gzip.NewWriterLevel(w, gzipLevel(opts.Compression))
 	if err != nil {
 		return 0, fmt.Errorf("archive: init gzip: %w", err)
 	}
 	tw := tar.NewWriter(gz)
 
-	count, walkErr := walkEntries(ctx, srcDir, destAbs, opts, func(e entry) error {
-		return tarAdd(tw, e)
+	count, walkErr := walkEntries(ctx, srcDir, destAbs, opts, skips, func(e entry) (bool, error) {
+		return tarAdd(tw, e, skips)
 	})
 
 	// Flush and close in order: tar first, then gzip. Keep the earliest error.
@@ -146,15 +165,15 @@ func writeTarGz(ctx context.Context, w io.Writer, srcDir, destAbs string, opts m
 }
 
 // writeZip streams a zip archive to w, using DEFLATE at the configured level.
-func writeZip(ctx context.Context, w io.Writer, srcDir, destAbs string, opts models.ArchiveOptions) (int, error) {
+func writeZip(ctx context.Context, w io.Writer, srcDir, destAbs string, opts models.ArchiveOptions, skips *skipList) (int, error) {
 	zw := zip.NewWriter(w)
 	level := flateLevel(opts.Compression)
 	zw.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) {
 		return flate.NewWriter(out, level)
 	})
 
-	count, walkErr := walkEntries(ctx, srcDir, destAbs, opts, func(e entry) error {
-		return zipAdd(zw, e)
+	count, walkErr := walkEntries(ctx, srcDir, destAbs, opts, skips, func(e entry) (bool, error) {
+		return zipAdd(zw, e, skips)
 	})
 
 	closeErr := zw.Close()
@@ -171,11 +190,17 @@ func writeZip(ctx context.Context, w io.Writer, srcDir, destAbs string, opts mod
 // walkEntries walks srcDir and invokes add for every directory and regular file
 // that survives the include/exclude filters. It returns the number of regular
 // files passed to add. It honors ctx cancellation between entries.
-func walkEntries(ctx context.Context, srcDir, destAbs string, opts models.ArchiveOptions, add func(entry) error) (int, error) {
+func walkEntries(ctx context.Context, srcDir, destAbs string, opts models.ArchiveOptions, skips *skipList, add func(entry) (bool, error)) (int, error) {
 	var count int
 	err := filepath.WalkDir(srcDir, func(fullPath string, de fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return fmt.Errorf("archive: walk %q: %w", fullPath, walkErr)
+			// Unreadable entry (e.g. permission denied): skip it and keep going
+			// rather than aborting the whole backup.
+			skips.add(fullPath)
+			if de != nil && de.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if e := ctx.Err(); e != nil {
 			return e
@@ -210,9 +235,13 @@ func walkEntries(ctx context.Context, srcDir, destAbs string, opts models.Archiv
 			}
 			info, ierr := de.Info()
 			if ierr != nil {
-				return fmt.Errorf("archive: stat dir %q: %w", fullPath, ierr)
+				skips.add(fullPath)
+				return nil
 			}
-			return add(entry{rel: rel, full: fullPath, info: info, isDir: true})
+			if _, aerr := add(entry{rel: rel, full: fullPath, info: info, isDir: true}); aerr != nil {
+				return aerr
+			}
+			return nil
 		}
 
 		// Only regular files carry content.
@@ -227,12 +256,16 @@ func walkEntries(ctx context.Context, srcDir, destAbs string, opts models.Archiv
 		}
 		info, ierr := de.Info()
 		if ierr != nil {
-			return fmt.Errorf("archive: stat file %q: %w", fullPath, ierr)
+			skips.add(fullPath)
+			return nil
 		}
-		if aerr := add(entry{rel: rel, full: fullPath, info: info, isDir: false}); aerr != nil {
+		stored, aerr := add(entry{rel: rel, full: fullPath, info: info, isDir: false})
+		if aerr != nil {
 			return aerr
 		}
-		count++
+		if stored {
+			count++
+		}
 		return nil
 	})
 	return count, err
@@ -240,64 +273,82 @@ func walkEntries(ctx context.Context, srcDir, destAbs string, opts models.Archiv
 
 // tarAdd writes a single directory or regular-file entry to the tar stream,
 // preserving mode and modification time.
-func tarAdd(tw *tar.Writer, e entry) error {
-	hdr, err := tar.FileInfoHeader(e.info, "")
-	if err != nil {
-		return fmt.Errorf("archive: tar header %q: %w", e.rel, err)
-	}
+func tarAdd(tw *tar.Writer, e entry, skips *skipList) (bool, error) {
 	if e.isDir {
+		hdr, err := tar.FileInfoHeader(e.info, "")
+		if err != nil {
+			return false, fmt.Errorf("archive: tar header %q: %w", e.rel, err)
+		}
 		hdr.Name = e.rel + "/"
-	} else {
-		hdr.Name = e.rel
+		if err := tw.WriteHeader(hdr); err != nil {
+			return false, fmt.Errorf("archive: write tar header %q: %w", e.rel, err)
+		}
+		return false, nil
 	}
-	if err := tw.WriteHeader(hdr); err != nil {
-		return fmt.Errorf("archive: write tar header %q: %w", e.rel, err)
-	}
-	if e.isDir {
-		return nil
-	}
+
+	// Open the file BEFORE writing its header so an unreadable file is skipped
+	// cleanly (no dangling header that would corrupt the tar stream).
 	f, err := os.Open(e.full)
 	if err != nil {
-		return fmt.Errorf("archive: open %q: %w", e.full, err)
+		skips.add(e.full)
+		return false, nil
 	}
 	defer f.Close()
-	if _, err := io.Copy(tw, f); err != nil {
-		return fmt.Errorf("archive: copy %q: %w", e.rel, err)
+
+	hdr, err := tar.FileInfoHeader(e.info, "")
+	if err != nil {
+		return false, fmt.Errorf("archive: tar header %q: %w", e.rel, err)
 	}
-	return nil
+	hdr.Name = e.rel
+	if err := tw.WriteHeader(hdr); err != nil {
+		return false, fmt.Errorf("archive: write tar header %q: %w", e.rel, err)
+	}
+	if _, err := io.Copy(tw, f); err != nil {
+		return false, fmt.Errorf("archive: copy %q: %w", e.rel, err)
+	}
+	return true, nil
 }
 
 // zipAdd writes a single directory or regular-file entry to the zip stream,
 // using DEFLATE for files and preserving the modification time.
-func zipAdd(zw *zip.Writer, e entry) error {
-	hdr, err := zip.FileInfoHeader(e.info)
-	if err != nil {
-		return fmt.Errorf("archive: zip header %q: %w", e.rel, err)
-	}
-	hdr.Modified = e.info.ModTime()
+func zipAdd(zw *zip.Writer, e entry, skips *skipList) (bool, error) {
 	if e.isDir {
+		hdr, err := zip.FileInfoHeader(e.info)
+		if err != nil {
+			return false, fmt.Errorf("archive: zip header %q: %w", e.rel, err)
+		}
+		hdr.Modified = e.info.ModTime()
 		hdr.Name = e.rel + "/"
 		hdr.Method = zip.Store
-	} else {
-		hdr.Name = e.rel
-		hdr.Method = zip.Deflate
+		if _, err := zw.CreateHeader(hdr); err != nil {
+			return false, fmt.Errorf("archive: create zip entry %q: %w", e.rel, err)
+		}
+		return false, nil
 	}
-	w, err := zw.CreateHeader(hdr)
-	if err != nil {
-		return fmt.Errorf("archive: create zip entry %q: %w", e.rel, err)
-	}
-	if e.isDir {
-		return nil
-	}
+
+	// Open before creating the entry so an unreadable file is skipped cleanly.
 	f, err := os.Open(e.full)
 	if err != nil {
-		return fmt.Errorf("archive: open %q: %w", e.full, err)
+		skips.add(e.full)
+		return false, nil
 	}
 	defer f.Close()
-	if _, err := io.Copy(w, f); err != nil {
-		return fmt.Errorf("archive: copy %q: %w", e.rel, err)
+
+	hdr, err := zip.FileInfoHeader(e.info)
+	if err != nil {
+		return false, fmt.Errorf("archive: zip header %q: %w", e.rel, err)
 	}
-	return nil
+	hdr.Modified = e.info.ModTime()
+	hdr.Name = e.rel
+	hdr.Method = zip.Deflate
+	w, err := zw.CreateHeader(hdr)
+	if err != nil {
+		return false, fmt.Errorf("archive: create zip entry %q: %w", e.rel, err)
+	}
+	if _, err := io.Copy(w, f); err != nil {
+		return false, fmt.Errorf("archive: copy %q: %w", e.rel, err)
+	}
+	return true, nil
 }
 
 // matchAny reports whether rel matches any of the glob patterns, testing both
