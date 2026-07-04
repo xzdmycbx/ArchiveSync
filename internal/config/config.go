@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"archivesync/internal/crypto"
 	"gopkg.in/yaml.v3"
@@ -54,6 +55,11 @@ func (c *Config) ApplyDefaults() {
 	d := Default()
 	if c.Listen == "" {
 		c.Listen = d.Listen
+	}
+	// Coerce a bare port (e.g. "18787") into a valid ":port" listen address,
+	// otherwise net.Listen fails with "missing port in address".
+	if !strings.Contains(c.Listen, ":") {
+		c.Listen = ":" + c.Listen
 	}
 	if c.DataDir == "" {
 		c.DataDir = d.DataDir

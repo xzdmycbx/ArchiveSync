@@ -47,7 +47,9 @@ echo
 
 # --- 1. 收集配置 ------------------------------------------------------------
 INSTALL_DIR="$(ask "安装路径" "/opt/archive-sync")"
-LISTEN="$(ask "监听地址" ":8787")"
+LISTEN="$(ask "监听地址（如 :8787 或 0.0.0.0:8787）" ":8787")"
+# Coerce a bare port (e.g. "8787") into ":8787" so net.Listen accepts it.
+case "$LISTEN" in *:*) ;; *) LISTEN=":${LISTEN}" ;; esac
 DEFAULT_HOST="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo localhost)"
 BASE_URL="$(ask "面板对外访问地址 (Base URL)" "http://${DEFAULT_HOST}:8787")"
 DATA_DIR="$(ask "数据目录" "${INSTALL_DIR}/data")"
