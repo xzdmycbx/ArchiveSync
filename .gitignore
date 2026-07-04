@@ -1,0 +1,17 @@
+# build output
+/archive-sync
+/archive-sync.exe
+/dist-bin/
+
+# runtime data & config
+/data/
+/config.yaml
+*.db
+*.db-wal
+*.db-shm
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
+*.log
